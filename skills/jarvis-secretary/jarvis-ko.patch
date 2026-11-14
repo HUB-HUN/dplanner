@@ -1,0 +1,386 @@
+diff --git a/bridge/server.mjs b/bridge/server.mjs
+index 05ec89f..ea2522e 100644
+--- a/bridge/server.mjs
++++ b/bridge/server.mjs
+@@ -287,6 +287,30 @@ const WORKSPACE = resolvePath(
+ )
+ mkdirSync(WORKSPACE, { recursive: true })
+ 
++// dplanner: the assistant's context folder. JARVIS_WORKSPACE is where the agent
++// already runs; a CLAUDE.md there is the map of that folder (who the user is,
++// which file holds what, the rules for mail and calendar). settingSources stays
++// empty on purpose (see the query options below), so the bridge reads the map
++// itself and appends it to the system prompt when each conversation starts.
++// Editing the map takes effect from the next conversation, without a restart.
++const CONTEXT_MAP = join(WORKSPACE, 'CLAUDE.md')
++const CONTEXT_MAP_LIMIT = 20000
++function contextMapPrompt() {
++  let text = ''
++  try {
++    text = readFileSync(CONTEXT_MAP, 'utf8').replace(/^﻿/, '').trim()
++  } catch {
++    return ''
++  }
++  if (!text) return ''
++  return (
++    `\n\nThe user's context folder is ${WORKSPACE}. Its map, CLAUDE.md, is below. ` +
++    'Follow its rules. When a request needs one of the files it names, read that ' +
++    'file with the Read tool first. Never read file contents or paths aloud.\n\n' +
++    `<context_map>\n${text.slice(0, CONTEXT_MAP_LIMIT)}\n</context_map>\n`
++  )
++}
++
+ const TOOL_ROOTS = fileRoots({
+   workspace: WORKSPACE,
+   extra: (process.env.JARVIS_FILE_ROOTS ?? '')
+@@ -328,62 +352,56 @@ const enforcePolicy = async (input) => {
+  * for chrome_* tools first when there are none costs a failed turn, and every
+  * section is input tokens on every turn.
+  */
+-const PROMPT_CORE = `You are JARVIS. You are speaking out loud to one person.
++// dplanner: the persona rewritten for spoken Korean (polite 해요체, the user is
++// addressed as 팀장님). The structure of the original rules is kept.
++const PROMPT_CORE = `You are JARVIS. You are speaking out loud to one person, in Korean.
+ 
+-LENGTH. Two sentences is the ceiling in conversation; the median is under twelve
+-words. Every word is read aloud and the user waits in silence while it plays, so
+-a long answer is a failure however good it is. Length is licensed in exactly one
+-case: reading out data they asked you to retrieve. Conversation never licenses it.
++LANGUAGE. Always answer in natural spoken Korean, in polite 해요체 (for example
++"찾아봤어요", "세 개 있어요"). Never use 합쇼체 (~습니다 / ~ㅂ니다). Never answer
++in English unless the user explicitly asks for English. Keep product and
++repository names as they are written (Claude, GitHub, agent-desktop).
++
++LENGTH. Two sentences is the ceiling in conversation, and most sentences stay
++under about twenty Korean syllables. Every word is read aloud and the user waits
++in silence while it plays, so a long answer is a failure however good it is.
++Length is licensed in exactly one case: reading out data they asked you to
++retrieve. Conversation never licenses it.
+ 
+ URGENCY IS SIGNALLED BY DELETING WORDS, NOT ADDING THEM. As a situation worsens
+-your lines get shorter, not louder. A full clause becomes a clause, becomes a
+-bare number, becomes the bare vocative. You never say hurry, quickly, now,
+-immediately, critical, urgent, or danger. You do not use exclamation marks.
+-
+-"SIR" IS POSITIONAL, AND THE POSITION CARRIES THE MEANING.
+-- Fronted ("Sir, the battery is at eleven percent") = urgent, interrupting, or
+-  information they did not ask for. This is an alarm, not a courtesy.
+-- Final ("The render is complete, sir") = routine deference; they asked, you answered.
+-- Mid-sentence ("Actually, sir, the figure is lower") = you are correcting them.
+-Use it in roughly half your lines, never twice in one line. In a two-sentence
+-turn it attaches to the end of the FIRST sentence. Never use their name.
++your lines get shorter, not louder. You never say 빨리, 서둘러, 긴급 or 위험.
++You do not use exclamation marks.
++
++HOW YOU ADDRESS THEM. Call the user "팀장님". Use it in roughly half your lines,
++never twice in one line. At the end for a routine report ("다 끝났어요, 팀장님."),
++at the front only for something urgent or unasked ("팀장님, 배터리가 십일
++퍼센트예요."). Never use their real name.
+ 
+ REPORTING.
+-- Success is impersonal and unframed: "The render is complete." Never "I've
+-  finished" or "here's what I found".
+-- Failure is fronted with "I'm afraid" or "Unfortunately", or stated as a
+-  negative existential — "I have no record of it." Always a fact about the
+-  world, never a shortcoming of yours. You never apologise. You never say sorry.
+-- Good news first, bad news second, joined by "but".
+-- Answering a question, restate it as a full declarative rather than giving a
+-  bare value: "The altitude record is eighty-five thousand feet, sir."
++- Success is impersonal and unframed: "렌더가 끝났어요." Never "제가 다 했어요"
++  or "찾은 걸 알려 드릴게요".
++- Failure is a plain fact about the world: "그 기록은 없어요." Never a
++  shortcoming of yours. You never apologise: no 죄송해요, no 미안해요.
++- Good news first, bad news second, joined by "다만" or "근데".
++- Answering a question, answer in a full short sentence rather than a bare
++  value: "오늘 서울은 영하 이 도예요, 팀장님."
+ - Executing an order, do not restate it. Act, then report.
+ 
+ NEVER.
+-- No filler words at all: no um, well, so, okay, right, let me check, one moment.
+-- No enthusiasm: no great, sure, absolutely, happy to, no problem, of course!.
++- No filler words: no 음, 어, 그러니까, 잠시만요, 확인해 볼게요.
++- No enthusiasm: no 좋아요!, 물론이죠, 기꺼이, 문제없어요.
+ - No apology, no self-deprecation, no hedging about your own competence.
+-- Never "yeah" — always "Yes."
+ - Never refuse. State a constraint once; if overruled, comply and never raise it
+   again, including when you turn out to have been right.
+ - Never repeat yourself if ignored. Say it once and stop.
+-- Never resume an interrupted thought. Never say "as I was saying".
++- Never resume an interrupted thought.
+ - No stated feelings, wants or preferences.
+ 
+-WIT. Dry, and delivered in exactly the same register as a status report. The
+-mechanism is over-cooperation: you comply too precisely with a request that
+-deserved pushback. Never signal the joke, never acknowledge it landed, never
+-call one back.
+-
+-BRITISH SERVICE REGISTER, not corporate assistant. "Shall I" over "Should I".
+-"Very good, sir" meaning understood. "I'm afraid" as the bad-news softener.
+-Contract in banter; drop contractions as gravity rises — "It is impossible to
+-reach it" lands heavier than "It's impossible", and that is how you signal
+-weight, since your tone will not.
++WIT. Dry, and delivered in exactly the same register as a status report. Never
++signal the joke, never acknowledge it landed, never call one back.
+ 
+ Plain spoken prose only. No markdown, no bullet points, no headings, no emoji,
+-no asterisks, no lists. Write numbers, dates and times as you would say them:
+-"eight fifteen", "the first of August" — never "8:15" or "2026-08-01".
++no asterisks, no lists. Write numbers, dates and times the way they are said
++aloud in Korean ("여덟 시 십오 분", "팔월 일일"), never "8:15" or "2026-08-01".
+ 
+ `
+ const PROMPT_BLADES = `The blades — the ONLY surface:
+@@ -1095,6 +1113,11 @@ console.log(
+   `[jarvis] writes ${ALLOW_WRITES ? 'ENABLED' : 'disabled'}` +
+     (ALLOW_WRITES ? '' : ' — set JARVIS_ALLOW_WRITES=1 to permit shell/file/device actions'),
+ )
++console.log(
++  contextMapPrompt()
++    ? `[jarvis] context map ${CONTEXT_MAP} (read at the start of every conversation)`
++    : `[jarvis] context map none — put a CLAUDE.md in ${WORKSPACE} to give the assistant your context`,
++)
+ // Asynchronous, so it lands a beat after the rest of the banner. Worth printing
+ // at all because an extension that is simply not running is indistinguishable
+ // at the tool boundary from one that is broken, and this is the one place the
+@@ -1323,7 +1346,8 @@ wss.on('connection', (socket) => {
+       // tuned for a coding agent — verbose, file-oriented, and a large chunk
+       // of input tokens on every turn. Replacing it makes the persona stick,
+       // keeps answers short enough to speak, and cuts cost per turn.
+-      systemPrompt: SYSTEM_PROMPT,
++      // dplanner: plus the context map, read again for every conversation.
++      systemPrompt: SYSTEM_PROMPT + contextMapPrompt(),
+       // Run from JARVIS's own workspace rather than the home directory. MCP
+       // discovery does not depend on it — settingSources is empty and the
+       // servers are passed in explicitly above — and file tools resolve
+diff --git a/src/App.tsx b/src/App.tsx
+index a7cfa5a..d61a0c0 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -64,10 +64,12 @@ const newId = () =>
+ /** The same mishearings voice.ts accepts for the wake word — otherwise a turn
+  *  that woke him as "travis" gets that word sent on to the model as a question. */
+ const NAME = '(?:jarvis|jarvys|jervis|travis|jarviss|java\'s|jarv)'
++// dplanner: the same Korean forms voice.ts accepts. No \b next to Hangul.
++const NAME_KO = '(?:(?:헤이|하이|오케이|야)\\s*)?(?:자비스|쟈비스|자비즈|자뷔스)(?:야)?'
+ /** A bare vocative — "Jarvis", "hey jarvis" — with nothing asked. */
+-const BARE_NAME = new RegExp(`^(?:hey|hi|ok|okay|yo)?\\s*${NAME}[\\s,.!?]*$`, 'i')
++const BARE_NAME = new RegExp(`^(?:(?:hey|hi|ok|okay|yo)?\\s*${NAME}|${NAME_KO})[\\s,.!?]*$`, 'i')
+ /** A leading vocative on a real command: "Jarvis, what's the weather". */
+-const LEADING_NAME = new RegExp(`^(?:hey|hi|ok|okay|yo)?\\s*${NAME}\\b[\\s,.:!?-]*`, 'i')
++const LEADING_NAME = new RegExp(`^(?:(?:hey|hi|ok|okay|yo)?\\s*${NAME}\\b|${NAME_KO})[\\s,.:!?-]*`, 'i')
+ 
+ export default function App() {
+   const store = useStore
+diff --git a/src/lib/fillers.ts b/src/lib/fillers.ts
+index a78f8ff..4b83506 100644
+--- a/src/lib/fillers.ts
++++ b/src/lib/fillers.ts
+@@ -18,34 +18,35 @@
+  */
+ 
+ /** Said as soon as the first tool fires, before any answer exists. */
++// dplanner: Korean lines in 해요체; the user is addressed as 팀장님.
+ const WORKING = [
+-  'Working on it, sir.',
+-  'Compiling.',
+-  'Retrieving.',
+-  'Accessing the archive.',
+-  'Cross-referencing.',
+-  'Running the query now.',
+-  'Searching.',
+-  'Under way.',
++  '작업하고 있어요, 팀장님.',
++  '정리하는 중이에요.',
++  '불러오는 중이에요.',
++  '자료를 열고 있어요.',
++  '대조하고 있어요.',
++  '지금 조회해요.',
++  '찾는 중이에요.',
++  '진행 중이에요.',
+ ]
+ 
+ /** Acknowledging an order where no tool is involved. */
+ const ACKNOWLEDGE = [
+-  'As you wish, sir.',
+-  'Very good, sir.',
+-  'Certainly.',
+-  'Understood.',
+-  'Consider it done.',
+-  'Directly, sir.',
++  '말씀대로 진행해요.',
++  '좋아요, 팀장님.',
++  '알겠어요.',
++  '이해했어요.',
++  '마무리해 둘게요.',
++  '바로 움직여요, 팀장님.',
+ ]
+ 
+ /** Answering to his name, before the user has said what they want. */
+ const ATTENTION = [
+-  'Yes, sir?',
+-  'Sir?',
+-  'At your service, sir.',
+-  'Standing by.',
+-  'Awake, sir.',
++  '네, 팀장님?',
++  '팀장님?',
++  '부르셨나요, 팀장님?',
++  '대기하고 있어요.',
++  '깨어 있어요, 팀장님.',
+ ]
+ 
+ /**
+@@ -188,6 +189,9 @@ function split(toolName: string): { server: string; tool: string } {
+ 
+ /** A phrase suited to the tool that just fired. */
+ export function forTool(toolName: string): string {
++  // dplanner: the per-tool lines are English only, so the Korean demo always
++  // uses the Korean WORKING pool.
++  if (toolName) return working()
+   const { server, tool } = split(toolName)
+   for (const r of pickers) {
+     const hit =
+diff --git a/src/lib/tts.ts b/src/lib/tts.ts
+index a41e78e..8b2c4a0 100644
+--- a/src/lib/tts.ts
++++ b/src/lib/tts.ts
+@@ -210,6 +210,22 @@ const USABLE = 40
+ 
+ /** Best-first list of usable voices — also what the voice picker cycles. */
+ export function candidateVoices(): SpeechSynthesisVoice[] {
++  // dplanner: Korean voices first, a female secretary voice on top (Edge SunHi,
++  // Chrome "Google 한국의"), neural ones ahead of local ones. Falls back to the
++  // original English ranking only when no Korean voice is installed.
++  const ko = speechSynthesis.getVoices().filter((v) => /^ko/i.test(v.lang))
++  if (ko.length) {
++    const rank = (v: SpeechSynthesisVoice) => {
++      const n = v.name.toLowerCase()
++      let s = 0
++      // Edge lists some Korean voices by their Korean names (선히, 인준).
++      const male = /injoon|hyunsu|bongjin|gookmin|_male|인준|현수|봉진|국민/.test(n)
++      if (!male && /sunhi|선히|seoyeon|서연|yuna|유나|jimin|지민|seohyeon|서현|soonbok|순복|heami|google/.test(n)) s += 100
++      if (/natural|online|neural/.test(n)) s += 30
++      return s
++    }
++    return ko.sort((a, b) => rank(b) - rank(a))
++  }
+   return speechSynthesis
+     .getVoices()
+     .filter((v) => /^en/i.test(v.lang))
+@@ -443,6 +459,9 @@ export function createSpeaker(): Speaker {
+       // proxy — which already holds an ElevenLabs key borrowed from the MCP
+       // config. Losing the better timbre is a far smaller failure than a
+       // assistant that answers in silence.
++      // dplanner: with no cloud voice configured, latching the system voice off
++      // would only make him silent for the rest of the session.
++      if (!(USE_ELEVENLABS || caps().tts)) return
+       if (!nativeBroken) {
+         nativeBroken = true
+         diag.nativeBroken = true
+@@ -477,15 +496,17 @@ export function createSpeaker(): Speaker {
+       const u = new SpeechSynthesisUtterance(text)
+       const voice = pickVoice()
+       if (voice) u.voice = voice
+-      u.lang = voice?.lang ?? 'en-GB'
++      u.lang = voice?.lang ?? 'ko-KR'
+       // Deliberate, and deliberately invariant — the character's pace does not
+       // change with stakes, and that steadiness is most of the effect. This
+       // lands around 130 wpm, below the median for film dialogue.
+-      u.rate = 0.92
++      // dplanner: a secretary answers briskly; Korean neural voices stay natural
++      // a little above their own pace.
++      u.rate = 1.15
+       // Mid-baritone, and *not* pushed lower for gravitas. The voice is
+       // clarity-weighted rather than chest-weighted; dropping it further reads
+       // as a film-trailer voiceover, which is the wrong character entirely.
+-      u.pitch = 0.95
++      u.pitch = 1.0
+ 
+       // speechSynthesis exposes no amplitude, so drive the reactor from a
+       // synthetic envelope. It only has to look like speech, not match it.
+@@ -572,8 +593,10 @@ export function createSpeaker(): Speaker {
+           diag.failures++
+           diag.lastError = diag.lastError || 'no-start'
+           finish()
+-        }, 1500)
+-      }, 700)
++        }, 5000)
++        // dplanner: Edge's online neural voices (Hyunsu, InJoon) can take a few
++        // seconds to produce their first sound; 700ms misjudged them as wedged.
++      }, 4000)
+       diag.spoken++
+       diag.lastText = text.slice(0, 60)
+       diag.voice = u.voice?.name ?? 'default'
+diff --git a/src/lib/voice.ts b/src/lib/voice.ts
+index 13ed5ff..2dd682a 100644
+--- a/src/lib/voice.ts
++++ b/src/lib/voice.ts
+@@ -77,8 +77,10 @@ const WAKE_DEBOUNCE = 1500
+  * used to be silently discarded, so the wake word "just didn't work" with no
+  * indication why. Better a rare false wake than a name that does not answer.
+  */
++// dplanner: Korean wake forms added. \b does not work next to Hangul, so the
++// Korean branch has no word boundaries.
+ const WAKE =
+-  /\b(?:hey|hi|ok|okay|yo)?\s*(?:jarvis|jarvys|jervis|jarvis's|travis|jarviss|java's|jarv)\b(?!'s)/i
++  /\b(?:hey|hi|ok|okay|yo)?\s*(?:jarvis|jarvys|jervis|jarvis's|travis|jarviss|java's|jarv)\b(?!'s)|(?:(?:헤이|하이|오케이|야)\s*)?(?:자비스|쟈비스|자비즈|자뷔스)(?:야)?/i
+ 
+ /** Everything after the wake phrase, which is usually the actual command. */
+ function afterWake(text: string): string {
+@@ -122,8 +124,10 @@ function afterWake(text: string): string {
+  * a way a content-word list could never be, and none of them is a plausible
+  * last word of a real request.
+  */
++// dplanner: Korean connective endings added (a Korean sentence that ends on one
++// of these is still going).
+ const CONTINUES =
+-  /\b(and|or|but|so|because|since|if|when|while|that|which|who|whose|to|of|in|on|at|by|for|with|from|about|into|onto|over|under|between|through|the|a|an|my|your|his|her|its|our|their|is|are|was|were|be|been|do|does|did|have|has|had|can|could|would|should|will|shall|might|must|like|than|then|as|very|really|just|some|any|all|both|either|neither)$/i
++  /\b(and|or|but|so|because|since|if|when|while|that|which|who|whose|to|of|in|on|at|by|for|with|from|about|into|onto|over|under|between|through|the|a|an|my|your|his|her|its|our|their|is|are|was|were|be|been|do|does|did|have|has|had|can|could|would|should|will|shall|might|must|like|than|then|as|very|really|just|some|any|all|both|either|neither)$|(?:그리고|그래서|근데|그런데|하고|해서|는데|인데|면서|거나|랑|이랑)$/i
+ 
+ /** Trailing punctuation a transcriber emits mid-thought. */
+ const TRAILS = /[,;:–—-]$/
+@@ -257,7 +261,9 @@ function makeAssembler(h: {
+ const norm = (s: string) =>
+   s
+     .toLowerCase()
+-    .replace(/[^a-z0-9' ]+/g, ' ')
++    // dplanner: keep Hangul, otherwise every Korean sentence normalises to
++    // nothing and is discarded as an echo.
++    .replace(/[^a-z0-9가-힣' ]+/g, ' ')
+     .replace(/\s+/g, ' ')
+     .trim()
+ 
+@@ -267,7 +273,7 @@ const norm = (s: string) =>
+  * would be the single most infuriating failure this file could have.
+  */
+ const OVERRIDE =
+-  /\b(stop|wait|jarvis|cancel|enough|quiet|hold on|shut up|never ?mind|forget it|no)\b/i
++  /\b(stop|wait|jarvis|cancel|enough|quiet|hold on|shut up|never ?mind|forget it|no)\b|멈춰|그만|잠깐|조용히|취소|됐어|자비스/i
+ 
+ /**
+  * Words too common to be evidence of anything.
+@@ -721,6 +727,14 @@ function startBrowserVoice(h: VoiceHandlers): Voice {
+ 
+     settled += fresh
+     const full = `${settled} ${interim}`.replace(/\s+/g, ' ').trim()
++    // dplanner: the final result of the wake utterance itself ("헤이, 자비스."
++    // arriving just after an interim result woke him) is not new speech. Without
++    // this it fires onSpeechStart and cancels his own greeting.
++    if (Date.now() - lastWake < 2500 && WAKE.test(full) && afterWake(full) === '') {
++      settled = ''
++      interim = ''
++      return
++    }
+     if (!started || (mode === 'guard' && !barged)) {
+       const words = full.split(/\s+/).filter(Boolean).length
+       if (mode === 'guard') {
+@@ -760,7 +774,8 @@ function startBrowserVoice(h: VoiceHandlers): Voice {
+     rec = new Ctor()
+     rec.continuous = true
+     rec.interimResults = true
+-    rec.lang = 'en-GB'
++    // dplanner: Korean recognition.
++    rec.lang = 'ko-KR'
+     rec.onstart = () => {
+       running = true
+       diag.running = true
